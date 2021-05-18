@@ -44,6 +44,9 @@
 #include <sys/wait.h>
 #include <netinet/in.h>
 
+#include <openssl/rand.h>
+#include <openssl/err.h>
+
 #include "config.h"
 #include "db.h"
 #include "db_io.h"
@@ -82,8 +85,6 @@
 extern "C" {
 #include "dependencies/linenoise.h"
 }
-
-#define RANDOM_DEVICE "/dev/random"
 
 static pid_t parent_pid;
 static bool in_child = false;
@@ -1272,53 +1273,42 @@ static void
 init_random(void)
 {
     long seed;
+    unsigned char sosemanuk_key[32];
 
-    sha256_ctx context;
-    unsigned char input[32];
-    unsigned char output[32];
-
-    memset(input, 0, sizeof(input));
-    memset(output, 0, sizeof(output));
-
-    sha256_init(&context);
+    char errbuf[256];
 
 #ifndef TEST
 
-    oklog("RANDOM: seeding from " RANDOM_DEVICE "\n");
+    oklog("RANDOM: seeding from OpenSSL's CSPRNG\n");
 
-    int fd;
+    /*
+     * Use OpenSSL's cryptographically-secure random number generator to seed
+     * our RNGs.
+     * This will use a one-off private CSPRNG for extra paranoia at relatively
+     * little expense, and die if it fails.
+     *
+     * NOTE: If earlier code generates OpenSSL errors but doesn't handle
+     * them properly, what this logs on failure might be an earlier error,
+     * rather than the one here.
+     */
 
-    if ((fd = open(RANDOM_DEVICE, O_RDONLY)) == -1) {
-        errlog("Can't open " RANDOM_DEVICE "!\n");
+    if (RAND_priv_bytes(sosemanuk_key, sizeof(sosemanuk_key)) != 1) {
+        ERR_error_string_n(ERR_get_error(), errbuf, sizeof(errbuf));
+
+        errlog("RANDOM: Couldn't get a seed from OpenSSL: %s\n", errbuf);
         exit(1);
     }
 
-    ssize_t count = 0, total = 0;
-    ssize_t required = MIN(MINIMUM_SEED_ENTROPY, sizeof(input));
-
-    while (total < required) {
-        if (total)
-            oklog("RANDOM: seeding ... (more bytes required)\n");
-        if ((count = read(fd, input + total, sizeof(input) - total)) == -1) {
-            errlog("Can't read " RANDOM_DEVICE "!\n");
-            exit(1);
-        }
-        total += count;
-    }
-
-    sha256_update(&context, sizeof(input), input);
-
-    close(fd);
 
 #else /* #ifndef TEST */
 
-    oklog("RANDOM: (-DTEST) not seeding!\n");
+    oklog("RANDOM: (-DTEST), using a NULL seed!\n");
+
+    memset(sosemanuk_key, 0, sizeof(sosemanuk_key));
 
 #endif
 
-    sha256_digest(&context, sizeof(output), output);
-
-    sosemanuk_schedule(&key_context, output, sizeof(output));
+    sosemanuk_schedule(&key_context, sosemanuk_key, sizeof(sosemanuk_key));
 
     sosemanuk_init(&run_context, &key_context, nullptr, 0);
 
